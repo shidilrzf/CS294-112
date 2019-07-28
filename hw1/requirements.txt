@@ -3,3 +3,5 @@ mujoco-py==1.50.1.56
 tensorflow
 numpy
 seaborn
+torch
+
