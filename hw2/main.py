@@ -2,60 +2,58 @@
 Original code from John Schulman for CS294 Deep Reinforcement Learning Spring 2017
 Adapted for CS294-112 Fall 2017 by Abhishek Gupta and Joshua Achiam
 Adapted for CS294-112 Fall 2018 by Michael Chang and Soroush Nasiriany
+Adapted for pytorch version by Ning Dai
 """
 import numpy as np
-import tensorflow as tf
-import torch.nn as nn
 import torch
 import gym
 import logz
+import scipy.signal
 import os
 import time
 import inspect
-from multiprocessing import Process
-from utils import normalize, init_weights
+import math
+from torch.multiprocessing import Process
+from torch import nn, optim
 
 
-#========================================================================================#
+# ============================================================================================#
+# Utilities
+# ============================================================================================#
+
+# ========================================================================================#
 #                           ----------PROBLEM 2----------
-#========================================================================================#
+# ========================================================================================#
+def build_mlp(input_size, output_size, n_layers, hidden_size, activation=nn.Tanh):
+    """
+        Builds a feedforward neural network
+
+        arguments:
+            input_size: size of the input layer
+            output_size: size of the output layer
+            n_layers: number of hidden layers
+            hidden_size: dimension of the hidden layers
+            activation: activation of the hidden layers
+            output_activation: activation of the output layer
+
+        returns:
+            an instance of nn.Sequential which contains the feedforward neural network
+
+        Hint: use nn.Linear
+    """
+    layers = []
+    # YOUR CODE HERE
+    for _ in range(n_layers):
+        layers += [nn.Linear(input_size, hidden_size), activation()]
+        input_size = hidden_size
+    layers += [nn.Linear(hidden_size, output_size)]
+
+    return nn.Sequential(*layers).apply(weights_init)
 
 
-class MLP(nn.Module):
-    def __init__(self, input_size, output_size, n_layers, hidden_size, is_discrete):
-        super(MLP, self).__init__()
-        self.input_size = input_size
-        self.hidden_size = hidden_size
-        self.output_size = output_size
-        self.n_layers = n_layers
-        self.is_discrete = is_discrete
-
-        self.logstd = nn.Parameter(torch.randn((self.output_size,)))
-
-        self.fc_input = nn.Linear(self.input_size, self.hidden_size)
-        self.middle_layers = []
-
-        for _ in range(n_layers - 1):
-            self.middle_layers.append(
-                nn.Linear(self.hidden_size, self.hidden_size))
-        self.m_layers = nn.ModuleList(self.middle_layers)
-
-        self.out_layer = nn.Linear(self.hidden_size, self.output_size)
-
-        self.sm = nn.Softmax()
-
-
-    def forward(self, x):
-        x = nn.functional.tanh(self.fc_input(x))
-        for layer in self.m_layers:
-            x = nn.functional.tanh(layer(x))
-
-        x = self.out_layer(x)
-        if self.is_discrete:
-            x = self.sm(x)
-            return x
-        else:
-            return x, self.logstd
+def weights_init(m):
+    if hasattr(m, 'weight'):
+        torch.nn.init.xavier_uniform_(m.weight)
 
 
 def pathlength(path):
@@ -67,24 +65,107 @@ def setup_logger(logdir, locals_):
     logz.configure_output_dir(logdir)
     # Log experimental parameters
     args = inspect.getargspec(train_PG)[0]
-    params = {k: locals_[k] if k in locals_ else None for k in args}
-    logz.save_params(params)
+    hyperparams = {k: locals_[k] if k in locals_ else None for k in args}
+    logz.save_params(hyperparams)
 
 
-#============================================================================================#
+class PolicyNet(nn.Module):
+    def __init__(self, neural_network_args):
+        super(PolicyNet, self).__init__()
+        self.ob_dim = neural_network_args['ob_dim']
+        self.ac_dim = neural_network_args['ac_dim']
+        self.discrete = neural_network_args['discrete']
+        self.hidden_size = neural_network_args['size']
+        self.n_layers = neural_network_args['n_layers']
+
+        self.define_model_components()
+
+    # ========================================================================================#
+    #                           ----------PROBLEM 2----------
+    # ========================================================================================#
+    def define_model_components(self):
+        """
+            Define the parameters of policy network here.
+            You can use any instance of nn.Module or nn.Parameter.
+
+            Hint: use the 'build_mlp' function above
+                In the discrete case, model should output logits of a categorical distribution
+                    over the actions
+                In the continuous case, model should output a tuple (mean, log_std) of a Gaussian
+                    distribution over actions. log_std should just be a trainable
+                    variable, not a network output.
+        """
+        if self.discrete:
+            self.mlp = build_mlp(self.ob_dim, self.ac_dim, self.n_layers, self.hidden_size)
+        else:
+            self.mlp = build_mlp(self.ob_dim, self.ac_dim, self.n_layers, self.hidden_size)
+            self.ts_logstd = nn.Parameter(torch.randn((self.ac_dim,)))
+
+    # ========================================================================================#
+    #                           ----------PROBLEM 2----------
+    # ========================================================================================#
+    """
+        Notes on notation:
+
+        Pytorch tensor variables have the prefix ts_, to distinguish them from the numpy array
+        variables that are computed later in the function
+
+        Prefixes and suffixes:
+        ob - observation 
+        ac - action
+        _no - this tensor should have shape (batch size, observation dim)
+        _na - this tensor should have shape (batch size, action dim)
+        _n  - this tensor should have shape (batch size)
+
+        Note: batch size is defined at runtime
+    """
+
+    def forward(self, ts_ob_no):
+        """
+            Define forward pass for policy network.
+
+            arguments:
+                ts_ob_no: (batch_size, self.ob_dim)
+
+            returns:
+                the parameters of the policy.
+
+                if discrete, the parameters are the logits of a categorical distribution
+                    over the actions
+                    ts_logits_na: (batch_size, self.ac_dim)
+
+                if continuous, the parameters are a tuple (mean, log_std) of a Gaussian
+                    distribution over actions. log_std should just be a trainable
+                    variable, not a network output.
+                    ts_mean: (batch_size, self.ac_dim)
+                    st_logstd: (self.ac_dim,)
+
+            Hint: use the components you defined in self.define_model_components
+        """
+        if self.discrete:
+            # YOUR_CODE_HERE
+            ts_logits_na = self.mlp(ts_ob_no)
+            return ts_logits_na
+        else:
+            # YOUR_CODE_HERE
+            ts_mean = self.mlp(ts_ob_no)
+            ts_logstd = self.ts_logstd
+            return (ts_mean, ts_logstd)
+
+
+# ============================================================================================#
 # Policy Gradient
-#============================================================================================#
-
+# ============================================================================================#
 
 class Agent(object):
-    def __init__(self, computation_graph_args, sample_trajectory_args, estimate_return_args):
+    def __init__(self, neural_network_args, sample_trajectory_args, estimate_return_args):
         super(Agent, self).__init__()
-        self.ob_dim = computation_graph_args['ob_dim']
-        self.ac_dim = computation_graph_args['ac_dim']
-        self.discrete = computation_graph_args['discrete']
-        self.size = computation_graph_args['size']
-        self.n_layers = computation_graph_args['n_layers']
-        self.learning_rate = computation_graph_args['learning_rate']
+        self.ob_dim = neural_network_args['ob_dim']
+        self.ac_dim = neural_network_args['ac_dim']
+        self.discrete = neural_network_args['discrete']
+        self.hidden_size = neural_network_args['size']
+        self.n_layers = neural_network_args['n_layers']
+        self.learning_rate = neural_network_args['learning_rate']
 
         self.animate = sample_trajectory_args['animate']
         self.max_path_length = sample_trajectory_args['max_path_length']
@@ -95,79 +176,34 @@ class Agent(object):
         self.nn_baseline = estimate_return_args['nn_baseline']
         self.normalize_advantages = estimate_return_args['normalize_advantages']
 
-        # Model def.
-        self.model = MLP(self.ob_dim, self.ac_dim,
-                         self.n_layers, self.size, self.discrete)
-        self.model.apply(init_weights)
+        self.policy_net = PolicyNet(neural_network_args)
+        params = list(self.policy_net.parameters())
 
-        self.lr = 1e-3
-        self.beta1 = 0.9
-        self.beta2 = 0.999
-
+        # ========================================================================================#
+        #                           ----------PROBLEM 6----------
+        # Optional Baseline
+        #
+        # Define a neural network baseline.
+        # ========================================================================================#
         if self.nn_baseline:
-            self.baseline_model = MLP(
-                self.ob_dim, 1, self.n_layers, self.size, True)
-            self.baseline_model.apply(init_weights)
-            # FIX this
-            self.base_opt = torch.optim.Adam(self.baseline_model.parameters(
-            ), lr=self.lr, betas=(self.beta1, self.beta2))
+            self.value_net = build_mlp(self.ob_dim, 1, self.n_layers, self.hidden_size)
+            params += list(self.value_net.parameters())
 
-        self.opt = torch.optim.Adam(self.model.parameters(
-        ), lr=self.lr, betas=(self.beta1, self.beta2))
+        self.optimizer = optim.Adam(params, lr=self.learning_rate)
 
-    #========================================================================================#
+    # ========================================================================================#
     #                           ----------PROBLEM 2----------
-    #========================================================================================#
-    def policy_forward_pass(self, sy_ob_no):
-        """ Constructs the symbolic operation for the policy network outputs,
-            which are the parameters of the policy distribution p(a|s)
-
-            arguments:
-                sy_ob_no: (batch_size, self.ob_dim)
-
-            returns:
-                the parameters of the policy.
-
-                if discrete, the parameters are the logits of a categorical distribution
-                    over the actions
-                    sy_logits_na: (batch_size, self.ac_dim)
-
-                if continuous, the parameters are a tuple (mean, log_std) of a Gaussian
-                    distribution over actions. log_std should just be a trainable
-                    variable, not a network output.
-                    sy_mean: (batch_size, self.ac_dim)
-                    sy_logstd: (self.ac_dim,)
-
-            Hint: use the 'build_mlp' function to output the logits (in the discrete case)
-                and the mean (in the continuous case).
-                Pass in self.n_layers for the 'n_layers' argument, and
-                pass in self.size for the 'size' argument.
+    # ========================================================================================#
+    def sample_action(self, ob_no):
         """
-        if self.discrete:
-            sy_logits_na = self.model(sy_ob_no)
-            return sy_logits_na
-        else:
-            sy_mean, sy_logstd = self.model(sy_ob_no)
-            return (sy_mean, sy_logstd)
-
-    #========================================================================================#
-    #                           ----------PROBLEM 2----------
-    #========================================================================================#
-    def sample_action(self, policy_parameters):
-        """ Constructs a symbolic operation for stochastically sampling from the policy
-            distribution
+            Build the method used for sampling action from the policy distribution
 
             arguments:
-                policy_parameters
-                    if discrete: logits of a categorical distribution over actions
-                        sy_logits_na: (batch_size, self.ac_dim)
-                    if continuous: (mean, log_std) of a Gaussian distribution over actions
-                        sy_mean: (batch_size, self.ac_dim)
-                        sy_logstd: (self.ac_dim,)
+                ob_no: (batch_size, self.ob_dim)
 
             returns:
-                sy_sampled_ac:
-                    if discrete: (batch_size,)
+                sampled_ac:
+                    if discrete: (batch_size)
                     if continuous: (batch_size, self.ac_dim)
 
             Hint: for the continuous case, use the reparameterization trick:
@@ -175,65 +211,66 @@ class Agent(object):
 
                       mu + sigma * z,         z ~ N(0, I)
 
-                 This reduces the problem to just sampling z. (Hint: use tf.random_normal!)
+                 This reduces the problem to just sampling z. (Hint: use torch.normal!)
         """
+        ts_ob_no = torch.from_numpy(ob_no).float()
+
         if self.discrete:
-            sy_logits_na = policy_parameters
-            sy_sampled_ac = torch.multinomial(
-                sy_logits_na, num_samples=1).view(-1)
+            ts_logits_na = self.policy_net(ts_ob_no)
+            # YOUR_CODE_HERE
+            ts_probs = nn.functional.log_softmax(ts_logits_na, dim=-1).exp()
+            ts_sampled_ac = torch.multinomial(ts_probs, num_samples=1).view(-1)
         else:
+            ts_mean, ts_logstd = self.policy_net(ts_ob_no)
+            # YOUR_CODE_HERE
+            ts_sampled_ac = torch.normal(mean=ts_mean, std=ts_logstd.exp())
 
-            sy_mean, sy_logstd = policy_parameters
-            sy_sampled_ac = torch.normal(mean=sy_mean, std=sy_logstd.exp())
-            sy_sampled_ac = sy_sampled_ac.sum(-1)
+        sampled_ac = ts_sampled_ac.numpy()
 
-        return sy_sampled_ac
+        return sampled_ac
 
-    #========================================================================================#
+    # ========================================================================================#
     #                           ----------PROBLEM 2----------
-    #========================================================================================#
-    def get_log_prob(self, policy_parameters, sy_ac_na):
-        """ Constructs a symbolic operation for computing the log probability of a set of actions
+    # ========================================================================================#
+    def get_log_prob(self, policy_parameters, ts_ac_na):
+        """
+            Build the method used for computing the log probability of a set of actions
             that were actually taken according to the policy
 
             arguments:
                 policy_parameters
                     if discrete: logits of a categorical distribution over actions
-                        sy_logits_na: (batch_size, self.ac_dim)
+                        ts_logits_na: (batch_size, self.ac_dim)
                     if continuous: (mean, log_std) of a Gaussian distribution over actions
-                        sy_mean: (batch_size, self.ac_dim)
-                        sy_logstd: (self.ac_dim,)
+                        ts_mean: (batch_size, self.ac_dim)
+                        ts_logstd: (self.ac_dim,)
 
-                sy_ac_na:
-                    if discrete: (batch_size,)
-                    if continuous: (batch_size, self.ac_dim)
+                ts_ac_na: (batch_size, self.ac_dim)
 
             returns:
-                sy_logprob_n: (batch_size)
+                ts_logprob_n: (batch_size)
 
             Hint:
                 For the discrete case, use the log probability under a categorical distribution.
                 For the continuous case, use the log probability under a multivariate gaussian.
         """
         if self.discrete:
-            sy_logits_na = policy_parameters
-            dist = torch.distributions.categorical.Categorical(
-                logits=sy_logits_na)
-            sy_logprob_n = dist.log_prob(sy_ac_na)
+            ts_logits_na = policy_parameters
+            # YOUR_CODE_HERE
+            ts_logprob_n = torch.distributions.Categorical(logits=ts_logits_na).log_prob(ts_ac_na)
         else:
-            sy_mean, sy_logstd = policy_parameters
-            # Reparam
-            dist = torch.distributions.Normal(loc=sy_mean, scale=sy_logstd)
-            sy_logprob_n = dist.log_prob(sy_ac_na)
-        return sy_logprob_n
+            ts_mean, ts_logstd = policy_parameters
+            # YOUR_CODE_HERE
+            ts_logprob_n = torch.distributions.Normal(loc=ts_mean, scale=ts_logstd.exp()).log_prob(ts_ac_na).sum(-1)
+
+        return ts_logprob_n
 
     def sample_trajectories(self, itr, env):
         # Collect paths until we have enough timesteps
         timesteps_this_batch = 0
         paths = []
         while True:
-            animate_this_episode = (len(paths) == 0 and (
-                itr % 10 == 0) and self.animate)
+            animate_this_episode = (len(paths) == 0 and (itr % 10 == 0) and self.animate)
             path = self.sample_trajectory(env, animate_this_episode)
             paths.append(path)
             timesteps_this_batch += pathlength(path)
@@ -250,16 +287,12 @@ class Agent(object):
                 env.render()
                 time.sleep(0.1)
             obs.append(ob)
-            #====================================================================================#
+            # ====================================================================================#
             #                           ----------PROBLEM 3----------
-            #====================================================================================#
-            ob_pt = torch.from_numpy(ob).float()
-            policy_parameters = self.model(ob_pt)
-            ac = self.sample_action(policy_parameters)
-            ac = ac.numpy()
+            # ====================================================================================#
+            ac = self.sample_action(ob[None])  # YOUR CODE HERE
             ac = ac[0]
             acs.append(ac)
-
             ob, rew, done, _ = env.step(ac)
             rewards.append(rew)
             steps += 1
@@ -270,12 +303,12 @@ class Agent(object):
                 "action": np.array(acs, dtype=np.float32)}
         return path
 
-    #====================================================================================#
+    # ====================================================================================#
     #                           ----------PROBLEM 3----------
-    #====================================================================================#
+    # ====================================================================================#
     def sum_of_rewards(self, re_n):
         """
-            Mont     e Carlo estimation of the Q function.
+            Monte Carlo estimation of the Q function.
 
             let sum_of_path_lengths be the sum of the lengths of the paths sampled from
                 Agent.sample_trajectories
@@ -340,29 +373,13 @@ class Agent(object):
             like the 'ob_no' and 'ac_na' above.
         """
         # YOUR_CODE_HERE
-        q_n = []
         if self.reward_to_go:
-            ret_tau = 0
-            for re in re_n:
-                for i in range(len(re)):
-                    Q_re = 0
-                    for j in range(i, len(re)):
-                        discount = self.gamma ** j
-                        ret_tau = discount * re[j]
-                        Q_re += ret_tau
-                    q_n.append(Q_re)
+            q_n = [scipy.signal.lfilter(b=[1], a=[1, -self.gamma], x=re[::-1])[::-1] for re in re_n]
         else:
-            ret_tau = 0
-            for re in re_n:
-                Q_re = 0
-                for i in range(len(re)):
-                    discount = self.gamma ** i
-                    ret_tau = discount * re[i]
-                    Q_re += ret_tau
-
-                q_n.extend([Q_re] * len(re))
-
-        return np.asarray(q_n)
+            q_n = [np.full_like(re, scipy.signal.lfilter(b=[1], a=[1, -self.gamma], x=re[::-1])[-1])
+                   for re in re_n]
+        q_n = np.concatenate(q_n).astype(np.float32)
+        return q_n
 
     def compute_advantage(self, ob_no, q_n):
         """
@@ -381,10 +398,10 @@ class Agent(object):
                 adv_n: shape: (sum_of_path_lengths). A single vector for the estimated
                     advantages whose length is the sum of the lengths of the paths
         """
-        #====================================================================================#
+        # ====================================================================================#
         #                           ----------PROBLEM 6----------
         # Computing Baselines
-        #====================================================================================#
+        # ====================================================================================#
         if self.nn_baseline:
             # If nn_baseline is True, use your neural network to predict reward-to-go
             # at each timestep for each trajectory, and save the result in a variable 'b_n'
@@ -393,10 +410,9 @@ class Agent(object):
             # Hint #bl1: rescale the output from the nn_baseline to match the statistics
             # (mean and std) of the current batch of Q-values. (Goes with Hint
             # #bl2 in Agent.update_parameters.
-            ob_no_pt = torch.from_numpy(ob_no).type(torch.FloatTensor)
-            b_n = self.baseline_model(ob_no_pt)
-            b_n.detach.numpy()
-            b_n = normalize(b_n, mu=np.mean(q_n), std=np.std(q_n))
+            b_n = self.value_net(torch.from_numpy(ob_no)).view(-1).numpy()  # YOUR CODE HERE
+            b_n = (b_n - np.mean(b_n)) / (np.std(b_n) + 1e-7)
+            b_n = b_n * np.std(q_n) + np.mean(q_n)
             adv_n = q_n - b_n
         else:
             adv_n = q_n.copy()
@@ -423,14 +439,14 @@ class Agent(object):
         """
         q_n = self.sum_of_rewards(re_n)
         adv_n = self.compute_advantage(ob_no, q_n)
-        #====================================================================================#
+        # ====================================================================================#
         #                           ----------PROBLEM 3----------
         # Advantage Normalization
-        #====================================================================================#
+        # ====================================================================================#
         if self.normalize_advantages:
             # On the next line, implement a trick which is known empirically to reduce variance
             # in policy gradient methods: normalize adv_n to have mean zero and std=1.
-            adv_n = normalize(adv_n)
+            adv_n = (adv_n - np.mean(adv_n)) / (np.std(adv_n) + 1e-7)  # YOUR_CODE_HERE
         return q_n, adv_n
 
     def update_parameters(self, ob_no, ac_na, q_n, adv_n):
@@ -450,71 +466,60 @@ class Agent(object):
                 nothing
 
         """
-        # 1) numpy -> tensor
-        # 2) obs to model, get policy parameters
-        #   a model.forward, sample actions, get logprobs
-        # 3) get the loss, logprobs * advantages
-        # 4) zero_grad, loss.back(), opt.step
+        # convert numpy array to pytorch tensor
+        ts_ob_no, ts_ac_na, ts_q_n, ts_adv_n = map(lambda x: torch.from_numpy(x), [ob_no, ac_na, q_n, adv_n])
 
-        ob_no_pt = torch.from_numpy(ob_no).type(torch.FloatTensor)
-        ac_na_pt = torch.from_numpy(ac_na).type(torch.FloatTensor)
-        q_n_pt = torch.from_numpy(q_n).type(torch.FloatTensor)
-        adv_n_pt = torch.from_numpy(adv_n).type(torch.FloatTensor)
+        # The policy takes in an observation and produces a distribution over the action space
+        policy_parameters = self.policy_net(ts_ob_no)
 
-        # # Policy forward
-        policy_parameters = self.policy_forward_pass(ob_no_pt)
+        # We can compute the logprob of the actions that were actually taken by the policy
+        # This is used in the loss function.
+        ts_logprob_n = self.get_log_prob(policy_parameters, ts_ac_na)
 
-        # Get the log prob
-        log_prob = self.get_log_prob(policy_parameters, ac_na_pt)
+        # clean the gradient for model parameters
+        self.optimizer.zero_grad()
 
-        model_loss = - (log_prob * adv_n_pt).mean()
+        # ========================================================================================#
+        #                           ----------PROBLEM 3----------
+        # Loss Function for Policy Gradient
+        # ========================================================================================#
+        loss = - (ts_logprob_n * ts_adv_n).mean()  # YOUR CODE HERE
+        loss.backward()
 
-        self.opt.zero_grad()
-        model_loss.backward()
-        self.opt.step()
-
-        #====================================================================================#
+        # ====================================================================================#
         #                           ----------PROBLEM 6----------
-        #                           TODO
-        #
         # Optimizing Neural Network Baseline
-        #====================================================================================#
+        # ====================================================================================#
         if self.nn_baseline:
             # If a neural network baseline is used, set up the targets and the inputs for the
             # baseline.
             #
             # Fit it to the current batch in order to use for the next iteration. Use the
-            # baseline_update_op you defined earlier.
+            # self.value_net you defined earlier.
             #
             # Hint #bl2: Instead of trying to target raw Q-values directly, rescale the
             # targets to have mean zero and std=1. (Goes with Hint #bl1 in
             # Agent.compute_advantage.)
 
-            # predicts the q
-            # 1) cast
-            # 2) model forward,
-            # 3) loss.mse
-            # 4) blabla
-
             # YOUR_CODE_HERE
-            q_n_baseline_output = self.baseline_model(ob_no_pt).view(-1)
-            q_n_pt_normalized = (q_n_pt - q_n_pt.mean()) / (q_n_pt.std() + 1e-7)
-            loss_fn = torch.nn.MSELoss()
-            self.baseline_loss = loss_fn(q_n_baseline_output, q_n_pt_normalized)
-            self.base_opt.zero_grad()
-            self.baseline_loss.backward()
-            self.base_opt.step()
+            baseline_prediction = self.value_net(ts_ob_no).view(-1)
+            ts_target_n = (ts_q_n - ts_q_n.mean()) / (ts_q_n.std() + 1e-7)
+            baseline_loss = torch.nn.functional.mse_loss(baseline_prediction, ts_target_n)
+            baseline_loss.backward()
 
-        #====================================================================================#
+        # ====================================================================================#
         #                           ----------PROBLEM 3----------
         # Performing the Policy Update
-        #====================================================================================#
+        # ====================================================================================#
 
-        # Call the update operation necessary to perform the policy gradient update based on
-        # the current batch of rollouts.
+        # Call the optimizer to perform the policy gradient update based on the current batch
+        # of rollouts.
         #
         # For debug purposes, you may wish to save the value of the loss function before
         # and after an update, and then log them below.
+
+        # YOUR_CODE_HERE
+        self.optimizer.step()
 
 
 def train_PG(
@@ -533,23 +538,22 @@ def train_PG(
         seed,
         n_layers,
         size):
-
     start = time.time()
 
-    #========================================================================================#
+    # ========================================================================================#
     # Set Up Logger
-    #========================================================================================#
+    # ========================================================================================#
     setup_logger(logdir, locals())
 
-    #========================================================================================#
+    # ========================================================================================#
     # Set Up Env
-    #========================================================================================#
+    # ========================================================================================#
 
     # Make the gym environment
     env = gym.make(env_name)
 
     # Set random seeds
-    tf.set_random_seed(seed)
+    torch.manual_seed(seed)
     np.random.seed(seed)
     env.seed(seed)
 
@@ -563,10 +567,10 @@ def train_PG(
     ob_dim = env.observation_space.shape[0]
     ac_dim = env.action_space.n if discrete else env.action_space.shape[0]
 
-    #========================================================================================#
+    # ========================================================================================#
     # Initialize Agent
-    #========================================================================================#
-    computation_graph_args = {
+    # ========================================================================================#
+    neural_network_args = {
         'n_layers': n_layers,
         'ob_dim': ob_dim,
         'ac_dim': ac_dim,
@@ -588,17 +592,18 @@ def train_PG(
         'normalize_advantages': normalize_advantages,
     }
 
-    agent = Agent(computation_graph_args,
-                  sample_trajectory_args, estimate_return_args)
+    agent = Agent(neural_network_args, sample_trajectory_args, estimate_return_args)
 
-    #========================================================================================#
+    # ========================================================================================#
     # Training Loop
-    #========================================================================================#
+    # ========================================================================================#
 
     total_timesteps = 0
     for itr in range(n_iter):
         print("********** Iteration %i ************" % itr)
-        paths, timesteps_this_batch = agent.sample_trajectories(itr, env)
+
+        with torch.no_grad():  # use torch.no_grad to disable the gradient calculation
+            paths, timesteps_this_batch = agent.sample_trajectories(itr, env)
         total_timesteps += timesteps_this_batch
 
         # Build arrays for observation, action for the policy gradient update by concatenating
@@ -607,9 +612,9 @@ def train_PG(
         ac_na = np.concatenate([path["action"] for path in paths])
         re_n = [path["reward"] for path in paths]
 
-        q_n, adv_n = agent.estimate_return(ob_no, re_n)
+        with torch.no_grad():
+            q_n, adv_n = agent.estimate_return(ob_no, re_n)
 
-        # PT loss.backward here
         agent.update_parameters(ob_no, ac_na, q_n, adv_n)
 
         # Log diagnostics
@@ -641,8 +646,7 @@ def main():
     parser.add_argument('--ep_len', '-ep', type=float, default=-1.)
     parser.add_argument('--learning_rate', '-lr', type=float, default=5e-3)
     parser.add_argument('--reward_to_go', '-rtg', action='store_true')
-    parser.add_argument('--dont_normalize_advantages',
-                        '-dna', action='store_true')
+    parser.add_argument('--dont_normalize_advantages', '-dna', action='store_true')
     parser.add_argument('--nn_baseline', '-bl', action='store_true')
     parser.add_argument('--seed', type=int, default=1)
     parser.add_argument('--n_experiments', '-e', type=int, default=1)
@@ -650,12 +654,11 @@ def main():
     parser.add_argument('--size', '-s', type=int, default=64)
     args = parser.parse_args()
 
-    if not(os.path.exists('data')):
+    if not (os.path.exists('data')):
         os.makedirs('data')
-    logdir = args.exp_name + '_' + args.env_name + \
-        '_' + time.strftime("%d-%m-%Y_%H-%M-%S")
+    logdir = args.exp_name + '_' + args.env_name + '_' + time.strftime("%d-%m-%Y_%H-%M-%S")
     logdir = os.path.join('data', logdir)
-    if not(os.path.exists(logdir)):
+    if not (os.path.exists(logdir)):
         os.makedirs(logdir)
 
     max_path_length = args.ep_len if args.ep_len > 0 else None
@@ -678,14 +681,13 @@ def main():
                 reward_to_go=args.reward_to_go,
                 animate=args.render,
                 logdir=os.path.join(logdir, '%d' % seed),
-                normalize_advantages=not(args.dont_normalize_advantages),
+                normalize_advantages=not (args.dont_normalize_advantages),
                 nn_baseline=args.nn_baseline,
                 seed=seed,
                 n_layers=args.n_layers,
                 size=args.size
             )
-        # # Awkward hacky process runs, because Tensorflow does not like
-        # # repeatedly calling train_PG in the same thread.
+
         p = Process(target=train_func, args=tuple())
         p.start()
         processes.append(p)

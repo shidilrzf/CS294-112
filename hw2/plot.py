@@ -62,6 +62,7 @@ def get_datasets(fpath, condition=None):
     unit = 0
     datasets = []
     for root, dir, files in os.walk(fpath):
+        print(root)
         if 'log.txt' in files:
             param_path = open(os.path.join(root,'params.json'))
             params = json.load(param_path)

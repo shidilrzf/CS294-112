@@ -14,18 +14,19 @@ parser.add_argument('--envname', type=str)
 parser.add_argument('--render', action='store_true')
 parser.add_argument("--max_timesteps", type=int, default=100)
 parser.add_argument('--num_rollouts', type=int, default=20,
-                        help='Number of expert roll outs')
+                    help='Number of expert roll outs')
 parser.add_argument('--batch_size', type=int, default=20)
 
 args = parser.parse_args()
 
-expert_data = pickle.load(open(os.path.join('expert_data/' + args.envname + '.pkl'), 'rb'))
+expert_data = pickle.load(
+    open(os.path.join('expert_data/' + args.envname + '.pkl'), 'rb'))
 expert_obs = expert_data['observations']
 expert_act = expert_data['actions']
 
 model = models.bc(expert_obs.shape[1], expert_act.shape[1])
 path_model = 'models/bc_{}.pt'.format(args.envname)
-checkpoint=torch.load(path_model, map_location='cpu' )
+checkpoint = torch.load(path_model, map_location='cpu')
 model.load_state_dict(checkpoint['state_dict'])
 print('loading and building expert policy')
 policy_fn = load_policy_pytorch.load_policy(args.expert_policy_file)
@@ -92,5 +93,3 @@ for i in range(args.num_rollouts):
 print('returns', returns_bc)
 print('mean return', np.mean(returns_bc))
 print('std of return', np.std(returns_bc))
-
-
